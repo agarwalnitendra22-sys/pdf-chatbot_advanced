@@ -31,25 +31,63 @@ try:
     import nltk
     from nltk.tokenize import sent_tokenize
     nltk_available = True
-    # Try to download required NLTK data if not present
+    # Download required NLTK data for cloud deployment
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
         try:
             nltk.download('punkt', quiet=True)
-        except:
-            pass
+        except Exception as e:
+            # For cloud deployment, try downloading to a writable directory
+            import os
+            try:
+                os.makedirs('/tmp/nltk_data', exist_ok=True)
+                nltk.data.path.append('/tmp/nltk_data')
+                nltk.download('punkt', download_dir='/tmp/nltk_data', quiet=True)
+            except:
+                nltk_available = False
 except ImportError:
     missing_packages.append("nltk")
     nltk_available = False
 
-# Set page config
+# Set page config for Streamlit Cloud
 st.set_page_config(
     page_title="PDF Q&A Tool - Enhanced",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# Initialize NLTK data for cloud deployment
+@st.cache_resource
+def setup_nltk():
+    """Setup NLTK data for cloud deployment."""
+    if nltk_available:
+        try:
+            import os
+            # Create NLTK data directory in tmp for cloud deployment
+            nltk_data_dir = '/tmp/nltk_data'
+            os.makedirs(nltk_data_dir, exist_ok=True)
+            
+            # Add to NLTK data path
+            if nltk_data_dir not in nltk.data.path:
+                nltk.data.path.append(nltk_data_dir)
+            
+            # Download punkt tokenizer
+            try:
+                nltk.data.find('tokenizers/punkt')
+            except LookupError:
+                nltk.download('punkt', download_dir=nltk_data_dir, quiet=True)
+                
+            return True
+        except Exception as e:
+            st.warning(f"NLTK setup warning: {e}")
+            return False
+    return False
+
+# Setup NLTK for cloud
+if nltk_available:
+    setup_nltk()
 
 # Custom CSS
 st.markdown("""
@@ -155,8 +193,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data
 def extract_text_from_pdf(pdf_file) -> str:
-    """Extract text from PDF file."""
+    """Extract text from PDF file with caching for cloud performance."""
     if PyPDF2 is None:
         return ""
     
@@ -178,8 +217,9 @@ def clean_text(text: str) -> str:
     text = re.sub(r'[^\w\s.,!?;:()\-\'""]', ' ', text)
     return text.strip()
 
+@st.cache_data
 def split_into_sentences(text: str) -> List[str]:
-    """Split text into sentences using NLTK or simple regex."""
+    """Split text into sentences using NLTK or simple regex with caching."""
     if nltk_available:
         try:
             sentences = sent_tokenize(text)
@@ -476,23 +516,40 @@ def main():
         # Process PDF only if it's a new file
         if "current_pdf_qa" not in st.session_state or st.session_state.current_pdf_qa != uploaded_file.name:
             with st.spinner("Processing PDF for Q&A..."):
+                # Use file hash for better caching in cloud
+                file_hash = hash(uploaded_file.read())
+                uploaded_file.seek(0)  # Reset file pointer
+                
                 pdf_text = extract_text_from_pdf(uploaded_file)
                 
                 if not pdf_text.strip():
-                    st.error("Could not extract text from PDF.")
+                    st.error("Could not extract text from PDF. Please ensure the PDF contains readable text.")
                     return
                 
+                # Show progress for large documents
+                if len(pdf_text) > 50000:
+                    progress_bar = st.progress(0)
+                    progress_bar.progress(0.3, "Creating Q&A system...")
+                
                 qa_system = EnhancedQASystem(pdf_text)
+                
+                if len(pdf_text) > 50000:
+                    progress_bar.progress(0.7, "Extracting keywords...")
                 
                 if not qa_system.sentences:
                     st.error("Could not process text into sentences.")
                     return
                 
                 keywords = extract_keywords(pdf_text, 20)
+                
+                if len(pdf_text) > 50000:
+                    progress_bar.progress(1.0, "Complete!")
+                    progress_bar.empty()
             
-            # Store in session state
+            # Store in session state with file hash for cloud optimization
             st.session_state.qa_system = qa_system
             st.session_state.current_pdf_qa = uploaded_file.name
+            st.session_state.file_hash = file_hash
             st.session_state.keywords_qa = keywords
             st.session_state.qa_results = []
             
@@ -655,6 +712,7 @@ def main():
         - 📊 **Confidence Scores**: Know how reliable each answer is
         - 📖 **Context Provided**: See surrounding text for better understanding
         - 🔍 **Fallback Search**: Traditional search when Q&A confidence is low
+        - ☁️ **Cloud Optimized**: Fast processing with smart caching
         
         **Perfect for:**
         - Research papers: "What is the main hypothesis?"
@@ -663,7 +721,10 @@ def main():
         - Legal documents: "What are the terms for Y?"
         - Academic papers: "What methodology was used?"
         
-        **Still completely FREE with no API keys required!**
+        **Completely FREE with no API keys required!**
+        
+        **📋 Supported file types:** PDF files with readable text
+        **⚡ Processing:** Optimized for Streamlit Cloud deployment
         """)
 
 if __name__ == "__main__":

@@ -325,7 +325,7 @@ class EnhancedQASystem:
             return self._extractive_answer_simple(question)
     
     def _extractive_answer_tfidf(self, question: str) -> Dict:
-        """TF-IDF based extractive answering."""
+        """TF-IDF based extractive answering with improved answer construction."""
         try:
             processed_question = preprocess_for_matching(question)
             
@@ -333,67 +333,135 @@ class EnhancedQASystem:
             question_vector = self.sentence_vectorizer.transform([processed_question])
             sentence_similarities = cosine_similarity(question_vector, self.sentence_vectors).flatten()
             
-            # Get top sentences
-            top_sentence_indices = np.argsort(sentence_similarities)[::-1][:5]
+            # Get top sentences with better scoring
+            top_sentence_indices = np.argsort(sentence_similarities)[::-1][:10]
             
-            # Find best matching chunks for context
+            # Find best matching chunks for comprehensive context
             chunk_question_vector = self.chunk_vectorizer.transform([processed_question])
             chunk_similarities = cosine_similarity(chunk_question_vector, self.chunk_vectors).flatten()
             best_chunk_idx = np.argmax(chunk_similarities)
             
-            # Prepare answer
+            # Construct comprehensive answer
             best_sentence_idx = top_sentence_indices[0]
-            best_sentence = self.sentences[best_sentence_idx]
+            primary_sentence = self.sentences[best_sentence_idx]
             confidence_score = sentence_similarities[best_sentence_idx]
             
-            # Get surrounding context
-            context_start = max(0, best_sentence_idx - 2)
-            context_end = min(len(self.sentences), best_sentence_idx + 3)
-            context = " ".join(self.sentences[context_start:context_end])
+            # Build comprehensive answer by combining related sentences
+            answer_parts = [primary_sentence]
+            
+            # Add closely related sentences if they're highly relevant
+            for idx in top_sentence_indices[1:4]:  # Check next 3 best matches
+                if sentence_similarities[idx] > max(0.3, confidence_score * 0.6):
+                    candidate_sentence = self.sentences[idx]
+                    # Avoid duplicate or very similar content
+                    if not any(self._sentences_too_similar(candidate_sentence, existing) for existing in answer_parts):
+                        answer_parts.append(candidate_sentence)
+            
+            # Create comprehensive answer
+            if len(answer_parts) > 1:
+                comprehensive_answer = " ".join(answer_parts)
+            else:
+                comprehensive_answer = primary_sentence
+            
+            # Get extended context window
+            context_start = max(0, best_sentence_idx - 3)
+            context_end = min(len(self.sentences), best_sentence_idx + 4)
+            extended_context = " ".join(self.sentences[context_start:context_end])
             
             return {
-                'answer': best_sentence,
+                'answer': comprehensive_answer,
                 'confidence': confidence_score,
-                'context': context,
+                'context': extended_context,
                 'source_chunk': self.chunks[best_chunk_idx] if best_chunk_idx < len(self.chunks) else "",
-                'method': 'TF-IDF Extractive'
+                'method': 'TF-IDF Extractive Enhanced',
+                'answer_parts': len(answer_parts)
             }
             
         except Exception as e:
             return self._extractive_answer_simple(question)
     
     def _extractive_answer_simple(self, question: str) -> Dict:
-        """Simple keyword-based extractive answering."""
+        """Enhanced keyword-based extractive answering with answer construction."""
         question_words = set(preprocess_for_matching(question).split())
+        question_lower = question.lower()
         
-        best_sentence = ""
-        best_score = 0
-        best_context = ""
-        best_chunk = ""
+        # Identify question type for better answer selection
+        question_type = self._identify_question_type(question_lower)
         
-        # Score each sentence
+        sentence_scores = []
+        
+        # Score each sentence with enhanced criteria
         for i, sentence in enumerate(self.sentences):
             sentence_words = set(preprocess_for_matching(sentence).split())
+            sentence_lower = sentence.lower()
             
             if question_words and sentence_words:
-                # Calculate overlap score
+                # Basic overlap score
                 overlap = len(question_words.intersection(sentence_words))
-                sentence_length_penalty = len(sentence.split()) / 50  # Prefer moderate length
-                score = (overlap / len(question_words)) - sentence_length_penalty
+                base_score = overlap / len(question_words)
                 
-                # Bonus for question words (what, how, when, where, why)
-                question_indicators = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
-                if any(word in sentence.lower() for word in question_indicators):
-                    score += 0.1
+                # Bonus scoring based on question type
+                bonus_score = 0
                 
-                if score > best_score:
-                    best_score = score
-                    best_sentence = sentence
+                # Question type bonuses
+                if question_type == 'what' and any(word in sentence_lower for word in ['is', 'are', 'means', 'refers', 'definition', 'purpose']):
+                    bonus_score += 0.2
+                elif question_type == 'how' and any(word in sentence_lower for word in ['method', 'process', 'way', 'approach', 'procedure']):
+                    bonus_score += 0.2
+                elif question_type == 'why' and any(word in sentence_lower for word in ['because', 'reason', 'due to', 'purpose', 'cause']):
+                    bonus_score += 0.2
+                elif question_type == 'when' and any(word in sentence_lower for word in ['date', 'time', 'year', 'month', 'during', 'period']):
+                    bonus_score += 0.2
+                elif question_type == 'where' and any(word in sentence_lower for word in ['location', 'place', 'region', 'area', 'country', 'city']):
+                    bonus_score += 0.2
+                
+                # Length penalty for very short or very long sentences
+                length_penalty = 0
+                word_count = len(sentence.split())
+                if word_count < 8:
+                    length_penalty = 0.1
+                elif word_count > 50:
+                    length_penalty = 0.05
+                
+                final_score = base_score + bonus_score - length_penalty
+                sentence_scores.append((i, sentence, final_score))
+        
+        # Sort by score
+        sentence_scores.sort(key=lambda x: x[2], reverse=True)
+        
+        # Build comprehensive answer
+        answer_parts = []
+        used_sentences = set()
+        
+        # Add best sentences that complement each other
+        for idx, sentence, score in sentence_scores[:5]:
+            if score > 0.1 and idx not in used_sentences:  # Minimum relevance threshold
+                # Check if this sentence adds new information
+                if not answer_parts or not self._sentences_too_similar(sentence, " ".join(answer_parts)):
+                    answer_parts.append(sentence)
+                    used_sentences.add(idx)
                     
-                    # Get context
-                    context_start = max(0, i - 2)
-                    context_end = min(len(self.sentences), i + 3)
-                    best_context = " ".join(self.sentences[context_start:context_end])
+                    # Stop if we have enough content or confidence is low
+                    if len(answer_parts) >= 3 or (len(answer_parts) >= 2 and score < 0.3):
+                        break
+        
+        if not answer_parts:
+            return {
+                'answer': "I couldn't find a specific answer to your question in the document.",
+                'confidence': 0.0,
+                'context': "",
+                'source_chunk': "",
+                'method': 'No Match Found'
+            }
+        
+        comprehensive_answer = " ".join(answer_parts)
+        best_score = sentence_scores[0][2] if sentence_scores else 0
+        
+        # Get context around the best matching sentence
+        best_idx = sentence_scores[0][0] if sentence_scores else 0
+        context_start = max(0, best_idx - 3)
+        context_end = min(len(self.sentences), best_idx + 4)
+        context = " ".join(self.sentences[context_start:context_end])
         
         # Find best chunk for additional context
         chunk_scores = []
@@ -404,17 +472,52 @@ class EnhancedQASystem:
                 score = overlap / len(question_words)
                 chunk_scores.append((chunk, score))
         
+        best_chunk = ""
         if chunk_scores:
             chunk_scores.sort(key=lambda x: x[1], reverse=True)
             best_chunk = chunk_scores[0][0]
         
         return {
-            'answer': best_sentence,
+            'answer': comprehensive_answer,
             'confidence': best_score,
-            'context': best_context,
+            'context': context,
             'source_chunk': best_chunk,
-            'method': 'Keyword Extractive'
+            'method': 'Enhanced Keyword Extractive',
+            'answer_parts': len(answer_parts)
         }
+    
+    def _identify_question_type(self, question_lower: str) -> str:
+        """Identify the type of question being asked."""
+        if question_lower.startswith('what'):
+            return 'what'
+        elif question_lower.startswith('how'):
+            return 'how'
+        elif question_lower.startswith('why'):
+            return 'why'
+        elif question_lower.startswith('when'):
+            return 'when'
+        elif question_lower.startswith('where'):
+            return 'where'
+        elif question_lower.startswith('who'):
+            return 'who'
+        elif question_lower.startswith('which'):
+            return 'which'
+        else:
+            return 'general'
+    
+    def _sentences_too_similar(self, sent1: str, sent2: str, threshold: float = 0.7) -> bool:
+        """Check if two sentences are too similar to avoid redundancy."""
+        words1 = set(preprocess_for_matching(sent1).split())
+        words2 = set(preprocess_for_matching(sent2).split())
+        
+        if not words1 or not words2:
+            return False
+        
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        jaccard_similarity = intersection / union if union > 0 else 0
+        return jaccard_similarity > threshold
     
     def search_chunks(self, query: str, top_k: int = 3) -> List[Tuple[str, float]]:
         """Search for relevant chunks (for fallback)."""
@@ -444,10 +547,10 @@ class EnhancedQASystem:
         return chunk_scores[:top_k]
 
 def get_confidence_level(score: float) -> Tuple[str, str]:
-    """Get confidence level and CSS class."""
-    if score >= 0.5:
+    """Get confidence level and CSS class with adjusted thresholds."""
+    if score >= 0.4:
         return "High Confidence", "confidence-high"
-    elif score >= 0.25:
+    elif score >= 0.2:
         return "Medium Confidence", "confidence-medium"
     else:
         return "Low Confidence", "confidence-low"
@@ -603,12 +706,23 @@ def main():
             for i, (q, result) in enumerate(reversed(st.session_state.qa_results)):
                 confidence_text, confidence_class = get_confidence_level(result['confidence'])
                 
+                # Enhanced answer display with better formatting
+                answer_display = result['answer']
+                if len(answer_display) < 50 and result.get('source_chunk'):
+                    # If answer is very short, try to provide more context from source chunk
+                    source_sentences = split_into_sentences(result['source_chunk'])
+                    for sent in source_sentences[:3]:
+                        if any(word in sent.lower() for word in q.lower().split() if len(word) > 3):
+                            answer_display = sent
+                            break
+                
                 st.markdown(f"""
                 <div class="answer-box">
                     <div class="{confidence_class}">{confidence_text} ({result['confidence']:.1%})</div>
                     <strong>❓ Question:</strong> {q}<br><br>
                     <strong>💡 Answer:</strong><br>
-                    {result['answer']}
+                    {answer_display}
+                    {f"<br><br><small><em>Combined from {result.get('answer_parts', 1)} relevant sections</em></small>" if result.get('answer_parts', 1) > 1 else ""}
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -670,18 +784,26 @@ def main():
             - ✅ **Specific questions**: "What is the main conclusion?" instead of "Tell me about this"
             - ✅ **Direct questions**: "How does X work?" "What are the benefits of Y?"
             - ✅ **Factual questions**: "What methodology was used?" "What were the results?"
+            - ✅ **Complete questions**: Include context words that might appear in the answer
             
             **Question types that work well:**
-            - **What**: What is the purpose? What are the findings?
-            - **How**: How does it work? How was it measured?
+            - **What**: What is the purpose? What are the findings? What does X mean?
+            - **How**: How does it work? How was it measured? How do you do X?
             - **When**: When was this conducted? When should this be applied?
             - **Why**: Why is this important? Why was this approach chosen?
             - **Where**: Where was this study done? Where is this applicable?
+            - **Who**: Who conducted this? Who is responsible for X?
+            
+            **Tips for better answers:**
+            - 🎯 Use keywords that likely appear in the answer
+            - 📝 Ask one clear question at a time
+            - 🔍 If confidence is low, try rephrasing or check search results
+            - 📖 Review context section for additional details
             
             **Confidence levels explained:**
-            - 🟢 **High**: Very relevant answer found
-            - 🟡 **Medium**: Somewhat relevant answer found
-            - 🔴 **Low**: Limited relevance, check context and source material
+            - 🟢 **High (40%+)**: Very relevant answer found
+            - 🟡 **Medium (20-40%)**: Somewhat relevant answer found  
+            - 🔴 **Low (<20%)**: Limited relevance, try rephrasing or search instead
             """)
         
         # Document statistics

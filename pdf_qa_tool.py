@@ -21,11 +21,7 @@ except ImportError:
     missing_packages.append("scikit-learn")
     sklearn_available = False
 
-try:
-    import tiktoken
-except ImportError:
-    missing_packages.append("tiktoken")
-    tiktoken = None
+# tiktoken removed - not needed for core functionality
 
 try:
     import nltk
